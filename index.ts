@@ -1,10 +1,14 @@
 import * as winston from "winston";
 import { mkdir } from "fs/promises";
-import { join } from "path";
+import { statSync } from "fs";
+import path, { join } from "path";
 import { parseArgs } from "util";
-import { createReadStream } from "fs";
 import { readdir } from "fs/promises";
 import { Readable } from "stream";
+import { ffprobe } from "fluent-ffmpeg";
+import type * as Ffmpeg from "fluent-ffmpeg";
+import { $ } from "bun";
+import { changeExtension } from "./util";
 
 // コマンドライン引数のパース
 const { values } = parseArgs({
@@ -27,10 +31,7 @@ await mkdir(workDir, { recursive: true });
 // Winstonロガーの設定
 const logger = winston.createLogger({
   level: "info",
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.json()
-  ),
+  format: winston.format.json(),
   transports: [
     // コンソールへの出力
     new winston.transports.Console({
@@ -51,13 +52,23 @@ const logger = winston.createLogger({
 });
 
 // ログの出力例
-logger.info("アプリケーションが起動しました");
-logger.warn("警告メッセージ");
-logger.error("エラーが発生しました", { error: "エラーの詳細" });
 logger.info("作業ディレクトリを作成しました", { workDir });
 
+if (!values.src) {
+  throw new Error("--src オプションは必須です");
+}
+
 // 動画ファイルの拡張子
-const VIDEO_EXTENSIONS = new Set([".mp4", ".avi", ".mov", ".mkv", ".wmv"]);
+const VIDEO_EXTENSIONS = new Set([".mp4", ".avi", ".mov", ".mkv"]);
+
+// 既存のimportの下に追加
+type TranscodeResult = {
+  inputFile: string;
+  outputFile: string;
+  inputSize: number;
+  outputSize: number;
+  transcodeRatio: number;
+};
 
 // 動画ファイルを列挙するストリームを作成
 async function* listVideoFiles(directory: string): AsyncGenerator<string> {
@@ -75,16 +86,86 @@ async function* listVideoFiles(directory: string): AsyncGenerator<string> {
   }
 }
 
-if (!values.src) {
-  throw new Error("--src オプションは必須です");
+async function* filterOldCodecVideoFiles(
+  files: AsyncGenerator<string>
+): AsyncGenerator<string> {
+  for await (const file of files) {
+    try {
+      const metadata: Ffmpeg.FfprobeData = await new Promise(
+        (resolve, reject) => {
+          ffprobe(file, (err, metadata) => {
+            if (err) reject(err);
+            else resolve(metadata);
+          });
+        }
+      );
+
+      for (const stream of metadata.streams) {
+        if (stream.codec_type === "video") {
+          logger.info("動画ストリームを検出しました", {
+            codec_name: stream.codec_name,
+            codec_long_name: stream.codec_long_name,
+            file: file,
+          });
+          if (
+            stream.codec_name?.includes("h264---------") ||
+            stream.codec_name?.includes("h265") ||
+            stream.codec_name?.includes("hevc") ||
+            stream.codec_name?.includes("av1")
+          ) {
+            logger.info("Codecが新しいのでスキップ", {
+              codec_name: stream.codec_name,
+              codec_long_name: stream.codec_long_name,
+              file: file,
+            });
+            continue;
+          }
+          yield file;
+        }
+      }
+    } catch (err) {
+      logger.error("メタデータ取得中にエラーが発生しました。スキップします", {
+        err,
+        file: file,
+      });
+    }
+  }
 }
 
-const videoStream = Readable.from(listVideoFiles(values.src));
+// transcodeVideo関数の戻り値の型を指定
+async function transcodeVideo(inputFile: string): Promise<TranscodeResult> {
+  logger.info("動画ファイルを変換します", { file: inputFile });
+  const relativePath = path.relative(values.src || "/", inputFile);
 
-videoStream.on("error", (error) => {
-  logger.error("ファイル列挙中にエラーが発生しました", { error });
-});
+  const outputFile = changeExtension(path.join(workDir, relativePath), ".mp4");
+  await mkdir(path.dirname(outputFile), { recursive: true });
+  await $`ffmpeg -i ${inputFile} -c:v libsvtav1 -q:v 25 -c:a copy ${outputFile}`;
 
-for await (const chunk of videoStream) {
-  logger.info(chunk);
+  const inputSize = statSync(inputFile).size;
+  const outputSize = statSync(outputFile).size;
+
+  return {
+    inputFile,
+    outputFile,
+    inputSize,
+    outputSize,
+    transcodeRatio: Math.trunc((outputSize / inputSize) * 100),
+  };
+}
+
+// transcodeVideoFileStreamの戻り値の型も更新
+async function* transcodeVideoFileStream(
+  files: AsyncGenerator<string>
+): AsyncGenerator<TranscodeResult> {
+  for await (const file of files) {
+    yield await transcodeVideo(file);
+  }
+}
+
+const videoFiles = listVideoFiles(values.src);
+const oldCodecVideoFiles = filterOldCodecVideoFiles(videoFiles);
+const transcodedVideoFiles = transcodeVideoFileStream(oldCodecVideoFiles);
+
+for await (const transcodeResult of transcodedVideoFiles) {
+  logger.info("変換後の動画ファイルを検出しました", { transcodeResult });
 }
