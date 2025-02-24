@@ -107,12 +107,7 @@ async function* filterOldCodecVideoFiles(
             codec_long_name: stream.codec_long_name,
             file: file,
           });
-          if (
-            stream.codec_name?.includes("h264---------") ||
-            stream.codec_name?.includes("h265") ||
-            stream.codec_name?.includes("hevc") ||
-            stream.codec_name?.includes("av1")
-          ) {
+          if (isModernCodec(stream.codec_name || "")) {
             logger.info("Codecが新しいのでスキップ", {
               codec_name: stream.codec_name,
               codec_long_name: stream.codec_long_name,
@@ -160,6 +155,17 @@ async function* transcodeVideoFileStream(
   for await (const file of files) {
     yield await transcodeVideo(file);
   }
+}
+
+function isModernCodec(codec_name: string) {
+  const modernCodecList = ["hevc", "av1", "h265"];
+
+  for (const modernCodecName of modernCodecList) {
+    if (codec_name.toLowerCase().includes(modernCodecName)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 const videoFiles = listVideoFiles(values.src);
