@@ -134,7 +134,8 @@ async function transcodeVideo(inputFile: string): Promise<TranscodeResult> {
 
   const outputFile = changeExtension(path.join(workDir, relativePath), ".mp4");
   await mkdir(path.dirname(outputFile), { recursive: true });
-  await $`ffmpeg -i ${inputFile} -c:v libsvtav1 -q:v 25 -c:a copy ${outputFile}`;
+  // await $`nice -n 19 ffmpeg -i ${inputFile} -c:v libsvtav1 -q:v 25 -c:a copy ${outputFile}`;
+  await $`nice -n 19 ffmpeg -vaapi_device /dev/dri/renderD128 -i ${inputFile} -c:v hevc_vaapi -vf 'format=nv12,hwupload' -qp 24 -c:a copy ${outputFile}`;
 
   const inputSize = statSync(inputFile).size;
   const outputSize = statSync(outputFile).size;
